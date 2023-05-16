@@ -1,0 +1,1067 @@
+---
+title: "Entopallium Ephys analysis"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r loadPackages}
+
+library(tidyverse)
+library(ggplot2)
+library(Hmisc)
+library(rcompanion)
+library(dplyr)
+library(FSA)
+library(readr)
+#library(made4)
+
+```
+
+
+
+#```{r setwd}
+#knitr::opts_knit$set(root.dir = choose.dir())
+#```
+
+
+```{r loadData}
+AllData = read.table("Ento_ephys_data_wideFormat.txt",sep="\t",header = T)
+spikesAllmelt = read.table("Ento_ephys_data_longFormat.txt",sep="\t",header = T)
+
+AllDataRaw = read.table("VisCellsEntRaw.txt",sep="\t",header = T)
+edges = seq(-0.999,2,0.05)
+colnames(AllDataRaw)[1:60] = round(edges,2)
+
+AllDataRaw$unitNo = parse_number(AllDataRaw$cellName)
+AllDataRaw$IDNo = parse_number(AllDataRaw$ID)
+```
+
+
+```{r setwd}
+```
+
+## PSTH of all visual neurons
+```{r }
+
+ggplot(subset(spikesAllmelt,variable!="1.95"),aes(y=value, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+spikesAllmelt %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+length(unique(spikesAllmelt$cellName))
+
+
+```
+
+## Spontaneous firing rate
+```{r }
+
+spontFR = subset(AllData, evtCor == "Contra",select=c(avgFR,light,evtCor,hemisph))
+spontFR$group = interaction(spontFR$light,spontFR$hemisph)
+
+scheirerRayHareTab = scheirerRayHare(avgFR~light*hemisph, data=spontFR)
+round(scheirerRayHareTab,3)
+
+dunnTest(avgFR ~ group,data=spontFR,method="bonferroni")
+
+ggplot(spontFR,aes(x=avgFR, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Spontaneous firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+
+## Select Bilateral cells
+```{r }
+
+#selection step 1 ####
+#select cells with the ipsilateral ON response
+#(ON response > average spontaneous FR + 4*SD) & (ON response > 5 spikes/s)
+#Remove these cells from all ‘visual neurons’
+
+IpsiOn = AllData %>%
+  filter(evtCor== "Ipsi" & maxON > preSD & maxON > 5) %>%
+  select(cellName)
+AllDataCleanSt1 = subset(AllData, (!cellName %in% unique(IpsiOn$cellName)))
+AllDataRawCleanSt1 = subset(AllDataRaw, (!cellName %in% unique(IpsiOn$cellName)))
+length(IpsiOn$cellName)
+
+#selection step 2####
+#select cells with the ipsilateral OFF response
+#(OFF response > average spontaneous FR + 4*SD) & (OFF response > 5 spikes/s)
+#Remove these cells from all ‘visual neurons’
+
+IpsiOff = AllDataCleanSt1 %>%
+  filter(evtCor== "Ipsi" & maxOFF > preSD & maxOFF > 5) %>%
+  select(cellName)
+AllDataCleanSt2 = AllDataCleanSt1 %>% filter(!cellName %in% unique(IpsiOff$cellName))
+AllDataRawCleanSt2 = subset(AllDataRawCleanSt1, (!cellName %in% unique(IpsiOff$cellName)))
+length(IpsiOff$cellName)
+
+#selection step 3####
+
+#ON Cells with either Contra or Binocular response above the threshold
+#(ONresponse > average spontaneous FR + 4*SD) & (ONresponse > 5 spikes/s)
+# with significantly different peak firing rate (Contra vs Binocular)
+#Remove these cells from all ‘visual neurons’
+
+
+AllDataRawCleanSt2 = left_join(AllDataRawCleanSt2, AllDataCleanSt2 %>% select(cellName,evtCor,maxBin,maxBinOff), by = c("cellName", "evtCor"))
+
+spikeSelContraBilOn.Names = AllDataCleanSt2 %>% filter(evtCor!="Ipsi" & maxON>preSD & maxON>5)
+spikeSelContraBilOn.Names = unique(spikeSelContraBilOn.Names$cellName)
+
+
+lll=unique(spikeSelContraBilOn.Names)
+maxBinOn.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawCleanSt2, cellName==lll[i])
+  
+  mCon = a[a$evtCor=="Contra",]
+  mCon = mCon[,as.character(unique(mCon$maxBin-0.025))]
+  mBil = a[a$evtCor=="Bilat",]
+  mBil = mBil[,as.character(unique(mBil$maxBin-0.025))]
+  
+  maxBin.Wilcox = wilcox.test(mBil,mCon, alternative = "two.sided",exact=F)$p.value
+  maxBinOn.Compare = rbind(maxBinOn.Compare,data.frame(cell = lll[i],maxBin.Wilcox = maxBin.Wilcox[1]))
+}
+
+cellDiffPeakON.Names = maxBinOn.Compare %>% filter(maxBin.Wilcox<0.05)
+cellDiffPeakON.Names = unique(cellDiffPeakON.Names$cell)
+
+AllDataCleanSt3 = AllDataCleanSt2 %>% filter(!cellName %in% cellDiffPeakON.Names)
+#length(unique(AllDataCleanSt3$cellName))
+
+AllDataRawCleanSt3 = AllDataRawCleanSt2 %>% filter(!cellName %in% cellDiffPeakON.Names)
+#length(unique(AllDataRawCleanSt3$cellName))
+
+#selection step 4####
+
+#ON Cells with significantly different firing rate, WHOLE STIMULUS (Contra vs Binocular)
+#(ONresponse > average spontaneous FR + 4*SD) & (ONresponse > 5 spikes/s)
+#ON Cells with significantly different firing rate, whole stimulus (Contra vs Binocular)
+#Remove these cells from all ‘visual neurons’
+
+
+spikeSelContraBilOn.Names = AllDataCleanSt3 %>% filter(evtCor!="Ipsi" & maxON>preSD & maxON>5)
+spikeSelContraBilOn.Names = unique(spikeSelContraBilOn.Names$cellName)
+
+lll=unique(spikeSelContraBilOn.Names)
+wholeStimOn.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawCleanSt3, cellName==lll[i])
+  
+  allCon = apply(a[a$evtCor=="Contra",21:40],2,mean)
+  allBil = apply(a[a$evtCor=="Bilat",21:40],2,mean)
+  
+  wholeStimOn.Wilcox = wilcox.test(allBil,allCon, alternative = "two.sided",exact=F)$p.value
+  wholeStimOn.Compare = rbind(wholeStimOn.Compare,data.frame(cell = lll[i],wholeStimOn.Wilcox = wholeStimOn.Wilcox[1]))
+}
+
+cellDiffWholeStimON.Names = wholeStimOn.Compare %>% filter(wholeStimOn.Wilcox<0.05)
+cellDiffWholeStimON.Names = unique(cellDiffWholeStimON.Names$cell)
+
+AllDataCleanSt4 = AllDataCleanSt3 %>% filter(!cellName %in% cellDiffWholeStimON.Names)
+#length(unique(AllDataCleanSt4$cellName))
+
+AllDataRawCleanSt4 = AllDataRawCleanSt3 %>% filter(!cellName %in% cellDiffWholeStimON.Names)
+#length(unique(AllDataRawCleanSt4$cellName))
+
+#Selection step5####
+
+#OFF Cells with significantly different PEAK firing rate (Contra vs Binocular)
+#(OFFresponse > average spontaneous FR + 4*SD) & (OFFresponse > 5 spikes/s)
+#OFF Cells with significantly different peak firing rate (Contra vs Binocular)
+#Remove these cells from all ‘visual neurons’
+
+spikeSelContraBilOff.Names = AllDataCleanSt4 %>% filter(evtCor!="Ipsi" & maxOFF>preSD & maxOFF>5)
+spikeSelContraBilOff.Names = unique(spikeSelContraBilOff.Names$cellName)
+
+
+lll=unique(spikeSelContraBilOff.Names)
+maxBinOff.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawCleanSt4, cellName==lll[i])
+  
+  mCon = a[a$evtCor=="Contra",]
+  mCon = mCon[,as.character(unique(mCon$maxBinOff-0.025+1))]
+  mBil = a[a$evtCor=="Bilat",]
+  mBil = mBil[,as.character(unique(mBil$maxBinOff-0.025+1))]
+  
+  maxBinOff.Wilcox = wilcox.test(mBil,mCon, alternative = "two.sided",exact=F)$p.value
+  maxBinOff.Compare = rbind(maxBinOff.Compare,data.frame(cell = lll[i],maxBinOff.Wilcox = maxBinOff.Wilcox[1]))
+}
+
+cellDiffPeakOFF.Names = maxBinOff.Compare %>% filter(maxBinOff.Wilcox<0.05)
+cellDiffPeakOFF.Names = unique(cellDiffPeakOFF.Names$cell)
+
+AllDataCleanSt5 = AllDataCleanSt4 %>% filter(!cellName %in% cellDiffPeakOFF.Names)
+#length(unique(AllDataCleanSt5$cellName))
+
+AllDataRawCleanSt5 = AllDataRawCleanSt4 %>% filter(!cellName %in% cellDiffPeakOFF.Names)
+#length(unique(AllDataRawCleanSt5$cellName))
+
+
+#Selection step6####
+
+#OFF Cells with significantly different firing rate, WHOLE STIMULUS (Contra vs Binocular)
+#(OFFresponse > average spontaneous FR + 4*SD) & (OFFresponse > 5 spikes/s)
+#OFF Cells with significantly different firing rate, whole stimulus (Contra vs Binocular)
+#Remove these cells from all ‘visual neurons’
+
+
+spikeSelContraBilOff.Names = AllDataCleanSt5 %>% filter(evtCor!="Ipsi" & maxOFF>preSD & maxOFF>5)
+spikeSelContraBilOff.Names = unique(spikeSelContraBilOff.Names$cellName)
+
+lll=unique(spikeSelContraBilOff.Names)
+wholeStimOff.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawCleanSt5, cellName==lll[i])
+  
+  allCon = apply(a[a$evtCor=="Contra",41:60],2,mean)
+  allBil = apply(a[a$evtCor=="Bilat",41:60],2,mean)
+  
+  wholeStimOff.Wilcox = wilcox.test(allBil,allCon, alternative = "two.sided",exact=F)$p.value
+  wholeStimOff.Compare = rbind(wholeStimOff.Compare,data.frame(cell = lll[i],wholeStimOff.Wilcox = wholeStimOff.Wilcox[1]))
+}
+
+cellDiffWholeStimOFF.Names = wholeStimOff.Compare %>% filter(wholeStimOff.Wilcox<0.05)
+cellDiffWholeStimOFF.Names = unique(cellDiffWholeStimOFF.Names$cell)
+
+AllDataCleanSt6 = AllDataCleanSt5 %>% filter(!cellName %in% cellDiffWholeStimOFF.Names)
+#length(unique(AllDataCleanSt6$cellName))
+
+AllDataRawCleanSt6 = AllDataRawCleanSt5 %>% filter(!cellName %in% cellDiffWholeStimOFF.Names)
+#length(unique(AllDataRawCleanSt6$cellName))
+
+
+#Selection step7__Put all the 'removed' bilaterally responsive cells in one category####
+
+BilatCells.Names = AllData %>% filter(!cellName %in% unique(AllDataRawCleanSt6$cellName))
+BilatCells.Names = unique(BilatCells.Names$cellName)
+
+spikesAllBilat = AllData %>% filter(cellName %in% BilatCells.Names)
+#length(unique(spikesAllBilat$cellName))
+
+AllDataRawBilat = AllDataRaw %>% filter(cellName %in% BilatCells.Names)
+#length(unique(AllDataRawBilat$cellName))
+
+#select poorly ipsilateral cells
+spikeSelBilatClean.Names = spikesAllBilat %>% filter(evtCor=="Contra" & maxOFF>preSD | maxON>preSD)
+spikeSelBilatClean.Names = spikeSelBilatClean.Names %>% filter(evtCor=="Contra" & maxOFF>5 | maxON>5)
+
+spikeSelBilatClean.Names = unique(spikeSelBilatClean.Names$cell)
+spikeSelPoorlyIpsi.Names = BilatCells.Names[!BilatCells.Names %in% unique(spikeSelBilatClean.Names)]
+
+spikesBilatClean = spikesAllBilat %>% filter(cellName %in% spikeSelBilatClean.Names)
+#length(unique(spikesBilatClean$cell))
+
+AllDataRawBilatClean = AllDataRawBilat %>% filter(cellName %in% spikeSelBilatClean.Names)
+#length(unique(AllDataRawBilatClean$cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikeSelBilatClean.Names)))
+
+
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  stat_summary(fun.y = mean, geom ="line", lwd = 1.2)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+sel %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+length(unique(sel$cellName))
+
+
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  stat_summary(fun.y = mean, geom ="line", lwd = 1.2)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  ggtitle("Bilaterally responsive neurons_spontaneous FR extracted")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=15)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+```
+
+## ANALYSIS of the bilaterally responsive neurons__spontaneous FR
+```{r }
+
+spontFR.Bilat = AllData %>% filter(evtCor=="Contra", cellName %in% spikeSelBilatClean.Names) %>% select(avgFR,light,evtCor,hemisph,cellName)
+spontFR.Bilat$group = interaction(spontFR.Bilat$light,spontFR.Bilat$hemisph)
+scheirerRayHareTabBilat = scheirerRayHare(avgFR~light*hemisph, data=spontFR.Bilat)
+round(scheirerRayHareTabBilat,3)
+
+dunnTest(avgFR ~ group,data=spontFR.Bilat,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spontFR.Bilat,aes(x=avgFR, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Spontaneous firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+
+## ANALYSIS of the bilaterally responsive neurons__Contralateral response. Firing rate. ON
+```{r }
+
+spikesBilatClean.ContraON = spikesBilatClean %>% filter(evtCor == "Contra" & maxON>preSD & maxON>5)
+
+spikesBilatClean.ContraON.Names = unique(spikesBilatClean.ContraON$cell)
+length(spikesBilatClean.ContraON.Names)
+
+spikesBilatClean.ContraON %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.ContraON$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+spikesBilatClean.ContraON$group = interaction(spikesBilatClean.ContraON$light,spikesBilatClean.ContraON$hemisph)
+spikesBilatClean.ContraON$maxONdelta = spikesBilatClean.ContraON$maxON-spikesBilatClean.ContraON$avgFR
+scheirerRayHareTabBilat.ContraON = scheirerRayHare((maxONdelta)~light*hemisph, data=spikesBilatClean.ContraON)
+round(scheirerRayHareTabBilat.ContraON,3)
+
+ggplot(spikesBilatClean.ContraON,aes(maxONdelta, fill=light))+
+  geom_density(alpha = 0.6)+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#,legend.position = "none")
+
+
+```
+
+## ANALYSIS of the bilaterally responsive neurons__Contralateral response. Latency. ON
+```{r }
+
+scheirerRayHareTabBilat.ContraON.lat = scheirerRayHare((maxBin)~light*hemisph, data=spikesBilatClean.ContraON)
+round(scheirerRayHareTabBilat.ContraON.lat,3)
+
+
+ggplot(spikesBilatClean.ContraON,aes(x=maxBin))+
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.ContraON, hemisph=="Left"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.ContraON, hemisph=="Right"),width=0.03, color="black")+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","grey"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+ggsave(file="Figure11_Ento_BilatneuronsContraON_peakLat_hist_hemisph.pdf", width = 10, height = 8)
+
+
+ggplot(spikesBilatClean.ContraON,aes(x=maxBin))+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraON, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraON, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+ggsave(file="Figure12_Ento_BilatneuronsContraON_peakLat_hist_light.pdf", width = 10, height = 8)
+
+
+```
+
+## ANALYSIS of the bilaterally responsive neurons__Contralateral response. Firing rate. OFF
+```{r }
+
+spikesBilatClean.ContraOFF = spikesBilatClean %>% filter(evtCor == "Contra" & maxOFF>preSD & maxOFF>5)
+
+spikesBilatClean.ContraOFF.Names = unique(spikesBilatClean.ContraOFF$cellName)
+length(spikesBilatClean.ContraOFF.Names)
+
+spikesBilatClean.ContraOFF %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.ContraOFF$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesBilatClean.ContraOFF$group = interaction(spikesBilatClean.ContraOFF$light,spikesBilatClean.ContraOFF$hemisph)
+spikesBilatClean.ContraOFF$maxOFFdelta = spikesBilatClean.ContraOFF$maxOFF-spikesBilatClean.ContraOFF$avgFR
+scheirerRayHareTabBilat.ContraOFF = scheirerRayHare((maxOFFdelta)~light*hemisph, data=spikesBilatClean.ContraOFF)
+round(scheirerRayHareTabBilat.ContraOFF,3)
+
+dunnTest(maxOFFdelta ~ group,data=spikesBilatClean.ContraOFF,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spikesBilatClean.ContraOFF,aes(x=maxOFFdelta, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+
+```
+
+## #ANALYSIS of the bilaterally responsive neurons__Contralateral response. Latency. OFF
+```{r}
+
+scheirerRayHareTabBilat.ContraOFF.lat = scheirerRayHare((maxBinOff)~light*hemisph, data=spikesBilatClean.ContraOFF)
+round(scheirerRayHareTabBilat.ContraOFF.lat,3)
+
+dunnTest(maxBinOff ~ group,data=spikesBilatClean.ContraOFF,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spikesBilatClean.ContraOFF,aes(x=maxBinOff, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraOFF, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraOFF, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+
+```
+
+## ANALYSIS of the bilaterally responsive neurons__Ipsilateral response. Firing rate. ON
+```{r}
+spikesBilatClean.IpsiON = spikesBilatClean %>% filter(evtCor == "Ipsi" & maxON>preSD & maxON>5)
+
+spikesBilatClean.IpsiON.Names = unique(spikesBilatClean.IpsiON$cellName)
+length(spikesBilatClean.IpsiON.Names)
+
+spikesBilatClean.IpsiON %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.IpsiON$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesBilatClean.IpsiON$group = interaction(spikesBilatClean.IpsiON$light,spikesBilatClean.IpsiON$hemisph)
+spikesBilatClean.IpsiON$maxONdelta = spikesBilatClean.IpsiON$maxON-spikesBilatClean.IpsiON$avgFR
+scheirerRayHareTabBilat.IpsiON = scheirerRayHare((maxONdelta)~light*hemisph, data=spikesBilatClean.IpsiON)
+round(scheirerRayHareTabBilat.IpsiON,3)
+
+dunnTest(maxONdelta ~ group,data=spikesBilatClean.IpsiON,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+
+ggplot(spikesBilatClean.IpsiON,aes(x=maxONdelta, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Ipsilateral response. Latency. ON
+
+```{r}
+
+scheirerRayHareTabBilat.IpsiON.lat = scheirerRayHare((maxBin)~light*hemisph, data=spikesBilatClean.IpsiON)
+round(scheirerRayHareTabBilat.IpsiON.lat,3)
+
+ggplot(spikesBilatClean.IpsiON,aes(x=maxBin))+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraON, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.ContraON, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Ipsilateral response. Firing rate. OFF
+
+```{r}
+
+spikesBilatClean.IpsiOFF = spikesBilatClean %>% filter(evtCor == "Ipsi" & maxOFF>preSD & maxOFF>5)
+
+spikesBilatClean.IpsiOFF.Names = unique(spikesBilatClean.IpsiOFF$cellName)
+length(spikesBilatClean.IpsiOFF.Names)
+
+spikesBilatClean.IpsiOFF %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.IpsiOFF$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  #stat_summary(fun.y = function(x) mean(x) + sd(x), geom ="line", linetype ="dotted")+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesBilatClean.IpsiOFF$group = interaction(spikesBilatClean.IpsiOFF$light,spikesBilatClean.IpsiOFF$hemisph)
+spikesBilatClean.IpsiOFF$maxOFFdelta = spikesBilatClean.IpsiOFF$maxOFF-spikesBilatClean.IpsiOFF$avgFR
+scheirerRayHareTabBilat.IpsiOFF = scheirerRayHare((maxOFFdelta)~light*hemisph, data=spikesBilatClean.IpsiOFF)
+round(scheirerRayHareTabBilat.IpsiOFF,3)
+
+ggplot(spikesBilatClean.IpsiOFF,aes(x=maxOFFdelta, fill=hemisph))+
+  geom_density(alpha = 0.6)+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","grey"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Ipsilateral response. Latency. OFF
+
+```{r}
+
+scheirerRayHareTabBilat.IpsiOFF.lat = scheirerRayHare((maxBinOff)~light*hemisph, data=spikesBilatClean.IpsiOFF)
+round(scheirerRayHareTabBilat.IpsiOFF.lat,3)
+
+
+ggplot(spikesBilatClean.IpsiOFF,aes(x=maxBinOff))+
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.IpsiOFF, hemisph=="Left"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.IpsiOFF, hemisph=="Right"),width=0.03, color="black")+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","grey"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Bilateral response. Firing rate. ON
+
+```{r}
+spikesBilatClean.BilatON = spikesBilatClean %>% filter(evtCor == "Bilat" & maxON>preSD & maxON>5)
+
+spikesBilatClean.BilatON.Names = unique(spikesBilatClean.BilatON$cellName)
+length(spikesBilatClean.BilatON.Names)
+
+spikesBilatClean.BilatON %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.BilatON$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesBilatClean.BilatON$group = interaction(spikesBilatClean.BilatON$light,spikesBilatClean.BilatON$hemisph)
+spikesBilatClean.BilatON$maxONdelta = spikesBilatClean.BilatON$maxON-spikesBilatClean.BilatON$avgFR
+scheirerRayHareTabBilat.BilatON = scheirerRayHare((maxONdelta)~light*hemisph, data=spikesBilatClean.BilatON)
+round(scheirerRayHareTabBilat.BilatON,3)
+
+
+
+ggplot(spikesBilatClean.ContraON,aes(x=maxONdelta, fill=light))+
+  geom_density(alpha = 0.7)+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Bilateral response. Latency. ON
+
+```{r}
+
+scheirerRayHareTabBilat.BilatON.lat = scheirerRayHare((maxBin)~light*hemisph, data=spikesBilatClean.BilatON)
+round(scheirerRayHareTabBilat.BilatON.lat,3)
+
+
+ggplot(spikesBilatClean.BilatON,aes(x=maxBin))+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.BilatON, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.BilatON, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+
+ggplot(spikesBilatClean.BilatON,aes(x=maxBin))+
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.BilatON, hemisph=="Left"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesBilatClean.BilatON, hemisph=="Right"),width=0.03, color="black")+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","grey"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Bilateral response. Firing rate. OFF
+
+```{r}
+
+spikesBilatClean.BilatOFF = spikesBilatClean %>% filter(evtCor == "Bilat" & maxOFF>preSD & maxOFF>5)
+
+spikesBilatClean.BilatOFF.Names = unique(spikesBilatClean.BilatOFF$cellName)
+length(spikesBilatClean.BilatOFF.Names)
+
+spikesBilatClean.BilatOFF %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesBilatClean.BilatOFF$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesBilatClean.BilatOFF$group = interaction(spikesBilatClean.BilatOFF$light,spikesBilatClean.BilatOFF$hemisph)
+spikesBilatClean.BilatOFF$maxOFFdelta = spikesBilatClean.BilatOFF$maxOFF-spikesBilatClean.BilatOFF$avgFR
+scheirerRayHareTabBilat.BilatOFF = scheirerRayHare((maxOFFdelta)~light*hemisph, data=spikesBilatClean.BilatOFF)
+round(scheirerRayHareTabBilat.BilatOFF,3)
+
+dunnTest(maxOFFdelta ~ group,data=spikesBilatClean.BilatOFF,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+
+ggplot(spikesBilatClean.BilatOFF,aes(x=maxOFFdelta, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Bilateral response. Latency. OFF
+
+```{r}
+
+scheirerRayHareTabBilat.BilatOFF.lat = scheirerRayHare((maxBinOff)~light*hemisph, data=spikesBilatClean.BilatOFF)
+round(scheirerRayHareTabBilat.BilatOFF.lat,3)
+
+dunnTest(maxBinOff ~ group,data=spikesBilatClean.BilatOFF,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spikesBilatClean.BilatOFF,aes(x=maxBinOff, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.BilatOFF, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesBilatClean.BilatOFF, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+```
+## ANALYSIS of the bilaterally responsive neurons__Peak response inhibition and excitation
+# Contralateral ON response
+
+```{r}
+# Contralateral ON response
+spikesBilatClean.ContraON = spikesBilatClean %>% filter(evtCor == "Contra" & maxON>preSD & maxON>5)
+
+spikesBilatClean.ContraON.Names = unique(spikesBilatClean.ContraON$cellName)
+length(spikesBilatClean.ContraON.Names)
+
+AllDataRawBilatClean = left_join(AllDataRawBilatClean, spikesBilatClean %>% select(cellName,evtCor,maxBin,maxBinOff))
+
+
+
+lll=unique(spikesBilatClean.ContraON.Names)
+maxBinOn.Bilat.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawBilatClean, cellName==lll[i])
+  
+  mCon = a[a$evtCor=="Contra",]
+  mCon = mCon[,as.character(unique(mCon$maxBin-0.025))]
+  mBil = a[a$evtCor=="Bilat",]
+  mBil = mBil[,as.character(unique(mBil$maxBin-0.025))]
+  
+  maxBin.Bilat.Wilcox = wilcox.test(mBil,mCon, alternative = "two.sided",exact=F)$p.value
+  maxBinOn.Bilat.Compare = rbind(maxBinOn.Bilat.Compare,data.frame(cellName = lll[i],maxBin.Bilat.Wilcox = maxBin.Bilat.Wilcox[1],
+                                                                   maxCon = mean(mCon),maxBil = mean(mBil),
+                                                                   light = unique(a$light), hemisph = unique(a$hemisph)))
+}
+
+maxBinOn.Bilat.Compare.Diff = maxBinOn.Bilat.Compare %>% filter(maxBin.Bilat.Wilcox < 0.05)
+maxBinOn.Bilat.Compare.Diff %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+maxBinOn.Bilat.Compare.Diff.Inhib = maxBinOn.Bilat.Compare.Diff %>% filter(maxCon > maxBil)
+maxBinOn.Bilat.Compare.Diff.Inhib %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+maxBinOn.Bilat.Compare.Diff.Excit = maxBinOn.Bilat.Compare.Diff %>% filter(maxCon < maxBil)
+maxBinOn.Bilat.Compare.Diff.Excit %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(maxBinOn.Bilat.Compare.Diff.Inhib$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = evtCor, color=evtCor))+
+  #facet_grid(evt~wulst)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("darkorange2","limegreen","dodgerblue2"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+ggsave(file="Figure50_Ento_BilatneuronsInhibit.pdf", width = 10, height = 8)
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(maxBinOn.Bilat.Compare.Diff.Excit$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = evtCor, color=evtCor))+
+  #facet_grid(evt~wulst)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("darkorange2","limegreen","dodgerblue2"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+```
+
+# Contralateral OFF response
+```{r}
+# Contralateral OFF response
+spikesBilatClean.ContraOFF = spikesBilatClean %>% filter(evtCor == "Contra" & maxOFF>preSD & maxOFF>5)
+
+spikesBilatClean.ContraOFF.Names = unique(spikesBilatClean.ContraOFF$cellName)
+length(spikesBilatClean.ContraOFF.Names)
+
+
+lll=unique(spikesBilatClean.ContraOFF.Names)
+maxBinOff.Bilat.Compare = NULL
+for (i in 1:length(lll)){
+  a=subset(AllDataRawBilatClean, cellName==lll[i])
+  
+  mConOff = a[a$evtCor=="Contra",]
+  mConOff = mConOff[,as.character(unique(mConOff$maxBinOff-0.025+1))]
+  mBilOff = a[a$evtCor=="Bilat",]
+  mBilOff = mBilOff[,as.character(unique(mBilOff$maxBinOff-0.025+1))]
+  
+  maxBinOff.Bilat.Wilcox = wilcox.test(mBilOff,mConOff, alternative = "two.sided",exact=F)$p.value
+  maxBinOff.Bilat.Compare = rbind(maxBinOff.Bilat.Compare,data.frame(cellName = lll[i],maxBinOff.Bilat.Wilcox = maxBinOff.Bilat.Wilcox[1],
+                                                                     maxCon = mean(mConOff),maxBil = mean(mBilOff),
+                                                                     light = unique(a$light), hemisph = unique(a$hemisph)))
+}
+
+maxBinOff.Bilat.Compare.Diff = maxBinOff.Bilat.Compare %>% filter(maxBinOff.Bilat.Wilcox < 0.05)
+maxBinOff.Bilat.Compare.Diff %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+maxBinOff.Bilat.Compare.Diff.Inhib = maxBinOff.Bilat.Compare.Diff %>% filter(maxCon > maxBil)
+maxBinOff.Bilat.Compare.Diff.Inhib %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+maxBinOff.Bilat.Compare.Diff.Excit = maxBinOff.Bilat.Compare.Diff %>% filter(maxCon < maxBil)
+maxBinOff.Bilat.Compare.Diff.Excit %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(maxBinOff.Bilat.Compare.Diff.Inhib$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = evtCor, color=evtCor))+
+  #facet_grid(evt~wulst)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("darkorange2","limegreen","dodgerblue2"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(maxBinOff.Bilat.Compare.Diff.Excit$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = evtCor, color=evtCor))+
+  #facet_grid(evt~wulst)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("darkorange2","limegreen","dodgerblue2"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+```
+## ANALYSIS of the contralaterally responsive neurons__spontaneous FR
+
+```{r}
+CleanCells.Names = unique(AllData$cellName)
+
+ContraCells.Names = CleanCells.Names[CleanCells.Names %in% unique(AllDataRawCleanSt6$cellName)]
+
+spikesAllContra = AllData %>% filter(cellName %in% ContraCells.Names)
+length(unique(spikesAllContra$cellName))
+
+AllDataRawContra = AllDataRaw %>% filter(cellName %in% ContraCells.Names)
+length(unique(AllDataRawContra$cellName))
+
+spikesAllContra %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(ContraCells.Names)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(ContraCells.Names)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value, x= factor(variable), group = evtCor, color=evtCor))+
+  #facet_grid(evt~wulst)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("darkorange2","limegreen","dodgerblue2"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+
+spontFR.Contra = AllData %>% filter(evtCor=="Contra", cellName %in% ContraCells.Names) %>% select(avgFR,light,evtCor,hemisph,cellName)
+spontFR.Contra$group = interaction(spontFR.Contra$light,spontFR.Contra$hemisph)
+scheirerRayHareTabContra = scheirerRayHare(avgFR~light*hemisph, data=spontFR.Contra)
+round(scheirerRayHareTabContra,3)
+
+dunnTest(avgFR ~ group,data=spontFR.Contra,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+#write.table(unlist(dn), "clipboard", sep="\t")
+
+ggplot(spontFR.Contra,aes(x=avgFR, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Spontaneous firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+
+
+## PSTH of all contralaterally responsive cells minus: "average spontaneous firing rate for 1 sec before the stimulus"
+
+```{r}
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(ContraCells.Names)))
+
+
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+```
+
+## ANALYSIS of the contralaterally responsive neurons__Contralateral response. Firing rate. ON
+
+```{r}
+spikesContraClean.ContraON = spikesAllContra %>% filter(evtCor == "Contra" & maxON>preSD & maxON>5)
+
+spikesContraClean.ContraON.Names = unique(spikesContraClean.ContraON$cellName)
+length(spikesContraClean.ContraON.Names)
+
+spikesContraClean.ContraON %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesContraClean.ContraON$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesContraClean.ContraON$group = interaction(spikesContraClean.ContraON$light,spikesContraClean.ContraON$hemisph)
+spikesContraClean.ContraON$maxONdelta = spikesContraClean.ContraON$maxON-spikesContraClean.ContraON$avgFR
+scheirerRayHareTabContra.ContraON = scheirerRayHare((maxONdelta)~light*hemisph, data=spikesContraClean.ContraON)
+round(scheirerRayHareTabContra.ContraON,3)
+
+dunnTest(maxONdelta ~ group,data=spikesContraClean.ContraON,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spikesContraClean.ContraON,aes(x=maxONdelta, fill=light, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_density()+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+
+```
+## ANALYSIS of the contralaterally responsive neurons__Contralateral response. Latency. ON
+```{r}
+
+scheirerRayHareTabContra.ContraON.lat = scheirerRayHare((maxBin)~light*hemisph, data=spikesContraClean.ContraON)
+round(scheirerRayHareTabContra.ContraON.lat,3)
+
+dunnTest(maxBin ~ group,data=spikesContraClean.ContraON,method="bonferroni")    # Adjusts p-values for multiple comparisons;
+
+ggplot(spikesContraClean.ContraON,aes(x=maxBin, alpha = hemisph))+
+  facet_grid(.~hemisph)+
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesContraClean.ContraON, light=="Dark"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = light), data = subset(spikesContraClean.ContraON, light=="Light"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+
+```
+## ANALYSIS of the contralaterally responsive neurons__Contralateral response. Firing rate. OFF
+
+```{r}
+
+spikesContraClean.ContraOFF = spikesAllContra %>% filter(evtCor == "Contra" & maxOFF>preSD & maxOFF>5)
+
+spikesContraClean.ContraOFF.Names = unique(spikesContraClean.ContraOFF$cellName)
+length(spikesContraClean.ContraOFF.Names)
+
+spikesContraClean.ContraOFF %>% group_by(light,hemisph) %>% summarise(count = n_distinct(cellName))
+
+sel = subset(subset(spikesAllmelt), (cellName %in% unique(spikesContraClean.ContraOFF$cellName)))
+ggplot(subset(sel,variable!="1.95"),aes(y=value-avgFR, x= factor(variable), group = light, color=light))+
+  facet_grid(evtCor~hemisph)+
+  annotate("rect", xmin = 21, xmax = 41, ymin = 0, ymax = Inf, fill = "yellow",alpha = .2)+
+  stat_summary(fun = mean, geom = "line", lwd=1.5)+
+  scale_x_discrete(breaks=c("-1","-0.5","0","0.5","1","1.5"))+
+  xlab("Time,s")+
+  ylab("Firing rate, spikes/s")+
+  scale_color_manual(values=c("black","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())#,legend.position='none')
+
+
+spikesContraClean.ContraOFF$group = interaction(spikesContraClean.ContraOFF$light,spikesContraClean.ContraOFF$hemisph)
+spikesContraClean.ContraOFF$maxOFFdelta = spikesContraClean.ContraOFF$maxOFF-spikesContraClean.ContraOFF$avgFR
+scheirerRayHareTabContra.ContraOFF = scheirerRayHare((maxOFFdelta)~light*hemisph, data=spikesContraClean.ContraOFF)
+round(scheirerRayHareTabContra.ContraOFF,3)
+
+
+ggplot(spikesContraClean.ContraOFF,aes(x=maxOFFdelta, fill=light, alpha=light))+
+  #facet_grid(.~wulst)+
+  geom_density(alpha=0.7)+
+  xlab("Peak firing rate, spikes/s")+
+  scale_fill_manual(values=c("grey40","red"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())
+
+```
+
+
+## ANALYSIS of the contralaterally responsive neurons__Contralateral response. Latency. OFF
+
+```{r}
+
+scheirerRayHareTabContra.ContraOFF.lat = scheirerRayHare((maxBinOff)~light*hemisph, data=spikesContraClean.ContraOFF)
+round(scheirerRayHareTabContra.ContraOFF.lat,3)
+
+
+
+ggplot(spikesContraClean.ContraOFF,aes(x=maxBinOff))+
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesContraClean.ContraOFF, hemisph=="Left"),width=0.045, color="black") +
+  geom_bar(aes(y = ..prop..,fill = hemisph), data = subset(spikesContraClean.ContraOFF, hemisph=="Right"),width=0.03, color="black")+
+  scale_alpha_discrete(range = c(0.8, 0.4))+
+  ylab("Proportion")+
+  xlab("Peak latency, s")+
+  scale_fill_manual(values=c("grey40","grey"))+
+  theme_bw(base_size=20)+
+  theme(panel.grid.major = element_blank())#legend.position = "none")
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
